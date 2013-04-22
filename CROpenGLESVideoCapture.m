@@ -11,6 +11,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "ShaderUtilities.h"
 #import "AudioWriter.h"
+#import <CoreMedia/CoreMedia.h>
 
 enum {
     ATTRIB_VERTEX,
@@ -26,10 +27,13 @@ enum {
 GLint uniforms[NUM_UNIFORMS];
 
 @interface CROpenGLESVideoCapture () {
-    CVOpenGLESTextureRef    renderTexture;
-    CVPixelBufferRef        cvPixelBuffer;
-    CMTime                  frameTime;
-    GLuint                  passThroughProgram;
+    CVOpenGLESTextureRef        renderTexture;
+    CVPixelBufferRef            cvPixelBuffer;
+    CMTime                      frameTime;
+    GLuint                      passThroughProgram;
+    CVOpenGLESTextureCacheRef   videoTextureCache;
+    GLuint                      depthBuffer;
+    CMBufferQueueRef            previewBufferQueue;
 }
 
 @property (nonatomic, assign)   BOOL                                    isCapturing;
@@ -98,7 +102,10 @@ GLint uniforms[NUM_UNIFORMS];
 }
 
 - (void)endCapturing {
+    
     [self setIsCapturing:NO];
+    CMBufferQueueReset(previewBufferQueue);
+    
     [[self audioWriter] stopRecording];
     
     [[self writerInput] markAsFinished];
@@ -123,22 +130,31 @@ GLint uniforms[NUM_UNIFORMS];
     }
     
     // Wait for rendering finish
-    glFinish();
+    //glFinish();
     
-    // Appending rendered frame to output video file
-    CVPixelBufferLockBaseAddress(cvPixelBuffer, 0);
-    if([[self assetWriterPixelBufferAdaptor] appendPixelBuffer:cvPixelBuffer
-                                          withPresentationTime:frameTime] == NO)
-    {
-        NSLog(@"Problem appending pixel buffer at time: %lld", frameTime.value);
+    // Enqueue video frame for asset writer
+    OSStatus err = CMBufferQueueEnqueue(previewBufferQueue, cvPixelBuffer);
+    if ( !err ) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CVPixelBufferRef sbuf = (CVPixelBufferRef)CMBufferQueueDequeueAndRetain(previewBufferQueue);
+            if (sbuf) {
+                // Appending rendered frame to output video file
+                if([[self assetWriterPixelBufferAdaptor] appendPixelBuffer:sbuf
+                                                      withPresentationTime:frameTime] == NO)
+                {
+                    NSLog(@"Problem appending pixel buffer at time: %lld", frameTime.value);
+                }
+                else
+                {
+                    frameTime.value++;
+                }
+                CFRelease(sbuf);
+            }
+        });
     }
-    else
-    {
-        frameTime.value++;
-    }
-    CVPixelBufferUnlockBaseAddress(cvPixelBuffer, 0);
     
     [self showRenderTextureOnScreen];
+    
 }
 
 #pragma mark - Frame rendering
@@ -151,14 +167,10 @@ GLint uniforms[NUM_UNIFORMS];
     [self initCVOpenGLESTexture];
     
     // Create depth buffer
-    GLuint depthBuffer = 0;
     glGenRenderbuffers(1, &depthBuffer);
     glBindRenderbuffer(GL_RENDERBUFFER, depthBuffer);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, [self videoRect].size.width, [self videoRect].size.height);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthBuffer);
-    
-    
-    //glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, [self originalDepthBuffer]);
     
     // Test framebuffer for completenes
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER) ;
@@ -171,7 +183,6 @@ GLint uniforms[NUM_UNIFORMS];
 }
 
 - (void)initCVOpenGLESTexture {
-    CVOpenGLESTextureCacheRef videoTextureCache;
     CVReturn err = CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, [EAGLContext currentContext], NULL, &videoTextureCache);
     
     if (err)
@@ -268,8 +279,9 @@ GLint uniforms[NUM_UNIFORMS];
     
     // Update attribute values.
     glVertexAttribPointer(ATTRIB_VERTEX, 2, GL_FLOAT, 0, 0, squareVertices);
-    glEnableVertexAttribArray(ATTRIB_VERTEX);
     glVertexAttribPointer(ATTRIB_TEXTUREPOSITION, 2, GL_FLOAT, 0, 0, textureVertices);
+    
+    glEnableVertexAttribArray(ATTRIB_VERTEX);
 	glEnableVertexAttribArray(ATTRIB_TEXTUREPOSITION);
     
     // Draw render texture on screen
@@ -290,6 +302,24 @@ GLint uniforms[NUM_UNIFORMS];
 }
 
 - (void)setupAssetWriter {
+    
+    // Create a shallow queue for buffers going to the display for preview.
+    if (!previewBufferQueue) {
+        CMBufferCallbacks *callbacks;
+        callbacks = malloc(sizeof(CMBufferCallbacks));
+        callbacks->version = 0;
+        callbacks->getDuration = timeCallback;
+        callbacks->refcon = NULL;
+        callbacks->getDecodeTimeStamp = NULL;
+        callbacks->getPresentationTimeStamp = NULL;
+        callbacks->isDataReady = NULL;
+        callbacks->compare = NULL;
+        callbacks->dataBecameReadyNotification = NULL;
+        
+        OSStatus queueCreationStatus = CMBufferQueueCreate(kCFAllocatorDefault, 0, callbacks, &previewBufferQueue);
+    }
+    
+    
     frameTime = CMTimeMake(0, 30);
     
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[self outputVideoFileURL] path]]) {
@@ -315,7 +345,6 @@ GLint uniforms[NUM_UNIFORMS];
                                                                          outputSettings:videoSettings];
     
     // Video caprtures upside down, so we need to flip it horizontal
-    // This attribute will handle landscape orientation
     [writerInput setTransform:CGAffineTransformMake(1.0, 0.0, 0, -1.0, 0.0, [self videoRect].size.height)];
     
     // You need to use BGRA for the video in order to get realtime encoding.
@@ -344,6 +373,10 @@ GLint uniforms[NUM_UNIFORMS];
     
     _audioWriter = [[AudioWriter alloc] init];
     [[self audioWriter] setOutputAudioFile:[self outputAudioFileURL]];
+}
+
+CMTime timeCallback(CMBufferRef buf, void *refcon){
+    return CMTimeMake(1, 30);
 }
 
 - (void)mergeVideo:(NSURL *)videoUrl withAudio:(NSURL *)audioUrl {
