@@ -298,7 +298,13 @@ GLint uniforms[NUM_UNIFORMS];
         width *= [[UIScreen mainScreen] scale];
         height *= [[UIScreen mainScreen] scale];
     }
-    return CGRectMake(0, 0, width, height);
+    
+    // Main screen bounds returns portrait orientation values
+    if (UIInterfaceOrientationIsLandscape([[UIApplication sharedApplication] statusBarOrientation])) {
+        return CGRectMake(0, 0, height, width);
+    } else {
+        return CGRectMake(0, 0, width, height);
+    }
 }
 
 - (void)setupAssetWriter {
@@ -334,10 +340,21 @@ GLint uniforms[NUM_UNIFORMS];
     
     CGRect videoRect = [self videoRect];
     
+    NSNumber *videoWidth;
+    NSNumber *videoHeight;
+    
+    if (UIInterfaceOrientationIsLandscape([[UIApplication sharedApplication] statusBarOrientation])) {
+        videoWidth = [NSNumber numberWithInt:1024];
+        videoHeight = [NSNumber numberWithInt:768];
+    } else {
+        videoWidth = [NSNumber numberWithInt:768];
+        videoHeight = [NSNumber numberWithInt:1024];
+    }
+    
     NSDictionary *videoSettings = [NSDictionary dictionaryWithObjectsAndKeys:
-                                   AVVideoCodecH264,                               AVVideoCodecKey,
-                                   [NSNumber numberWithInt:[[UIScreen mainScreen] bounds].size.width],  AVVideoWidthKey,
-                                   [NSNumber numberWithInt:[[UIScreen mainScreen] bounds].size.height], AVVideoHeightKey,
+                                   AVVideoCodecH264,    AVVideoCodecKey,
+                                   videoWidth,          AVVideoWidthKey,
+                                   videoHeight,         AVVideoHeightKey,
                                    nil];
     
     
