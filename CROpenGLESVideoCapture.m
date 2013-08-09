@@ -133,9 +133,6 @@ GLint uniforms[NUM_UNIFORMS];
         return;
     }
     
-    // Wait for rendering finish
-    //glFinish();
-    
     // Enqueue video frame for asset writer
     OSStatus err = CMBufferQueueEnqueue(previewBufferQueue, cvPixelBuffer);
     if ( !err ) {
@@ -291,13 +288,6 @@ GLint uniforms[NUM_UNIFORMS];
     
     // Draw the texture to the original frame buffer with OpenGL ES 2.0
     [self renderTexture];
-    
-//    const GLenum discards[]  = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT };
-//    glBindFramebuffer(GL_FRAMEBUFFER, _renderFrameBuffer);
-//    glDiscardFramebufferEXT(GL_FRAMEBUFFER, 2, discards);
-//    
-//    glBindFramebuffer(GL_FRAMEBUFFER, [self originalFrameBuffer]);
-//    glBindRenderbuffer(GL_RENDERBUFFER, [self originalRenderBuffer]);
     
     // Present render buffer on screen
     if(![[EAGLContext currentContext] presentRenderbuffer:GL_RENDERBUFFER])
@@ -548,8 +538,6 @@ CMTime timeCallback(CMBufferRef buf, void *refcon){
                       NUM_ATTRIBUTES, (const GLchar **)&attribName[0], attribLocation,
                       0, 0, 0, //  we don't need to get uniform locations
                       &passThroughProgram);
-    
-    //uniforms[UNIFORM_TEXTURE] = glGetUniformLocation(passThroughProgram, "videoframe");
 }
 
 - (CGRect)textureSamplingRectForCroppingTextureWithAspectRatio:(CGSize)textureAspectRatio toAspectRatio:(CGSize)croppingAspectRatio {
