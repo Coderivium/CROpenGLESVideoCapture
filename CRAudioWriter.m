@@ -6,16 +6,16 @@
 //  Copyright (c) 2013 Dmitry Utenkov. All rights reserved.
 //
 
-#import "AudioWriter.h"
+#import "CRAudioWriter.h"
 #import <AVFoundation/AVFoundation.h>
 
-@interface AudioWriter() <AVAudioRecorderDelegate> {
+@interface CRAudioWriter() <AVAudioRecorderDelegate> {
     AVAudioRecorder *recorder;
 }
 
 @end
 
-@implementation AudioWriter
+@implementation CRAudioWriter
 
 - (id)init {
     if (self = [super init]) {

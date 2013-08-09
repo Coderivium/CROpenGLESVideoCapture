@@ -10,12 +10,12 @@
 #import <AssetsLibrary/AssetsLibrary.h>
 #import <AVFoundation/AVFoundation.h>
 #import "ShaderUtilities.h"
-#import "AudioWriter.h"
+#import "CRAudioWriter.h"
 #import <CoreMedia/CoreMedia.h>
 
 enum {
-    ATTRIB_VERTEX,
-    ATTRIB_TEXTUREPOSITION,
+    POSITION_ATTRIBUTE,
+    TEXTURE_COORDINATE_ATTRIBUTE,
     NUM_ATTRIBUTES
 };
 
@@ -33,7 +33,10 @@ GLint uniforms[NUM_UNIFORMS];
     GLuint                      passThroughProgram;
     CVOpenGLESTextureCacheRef   videoTextureCache;
     GLuint                      depthBuffer;
-    CMBufferQueueRef            previewBufferQueue;
+    CMBufferQueueRef            previewBufferQueue; 
+    GLuint                      _positionVBO;
+    GLuint                      _texcoordVBO;
+    GLuint                      _indexVBO;
 }
 
 @property (nonatomic, assign)   BOOL                                    isCapturing;
@@ -43,7 +46,8 @@ GLint uniforms[NUM_UNIFORMS];
 @property (nonatomic, retain)   AVAssetWriter                           *writer;
 @property (nonatomic, retain)   AVAssetWriterInput                      *writerInput;
 @property (nonatomic, retain)   AVAssetWriterInputPixelBufferAdaptor    *assetWriterPixelBufferAdaptor;
-@property (nonatomic, retain)   AudioWriter                             *audioWriter;
+@property (nonatomic, retain)   CRAudioWriter                             *audioWriter;
+@property (nonatomic, assign)   CFTimeInterval                          previousTimestamp;
 
 @end
 
@@ -81,7 +85,6 @@ GLint uniforms[NUM_UNIFORMS];
         
         NSString *exportPath = [NSString stringWithFormat:@"%@/Documents/export.mov", NSHomeDirectory()];
         [self setExportedVideoURL:[NSURL fileURLWithPath:exportPath]];
-        
     }
     return self;
 }
@@ -91,7 +94,7 @@ GLint uniforms[NUM_UNIFORMS];
 - (void)startCapturing {
     [self setupAssetWriter];
     [[self writer] startWriting];
-    [[self writer] startSessionAtSourceTime:kCMTimeZero];
+    [[self writer] startSessionAtSourceTime:CMTimeMake(0, 1000)];
     
     // Setting up buffer for rendering to texture should be done after starting session
     // because pixelBufferPool returns nil before it
@@ -99,6 +102,7 @@ GLint uniforms[NUM_UNIFORMS];
     
     [[self audioWriter] startRecording];
     [self setIsCapturing:YES];
+    _previousTimestamp = CFAbsoluteTimeGetCurrent();
 }
 
 - (void)endCapturing {
@@ -146,7 +150,15 @@ GLint uniforms[NUM_UNIFORMS];
                 }
                 else
                 {
-                    frameTime.value++;
+                    // Calculation of time for frame rendering
+                    CFTimeInterval currentTimestamp = CFAbsoluteTimeGetCurrent();
+                    CFTimeInterval frameDuration = currentTimestamp - _previousTimestamp;
+                    _previousTimestamp = currentTimestamp;
+                    
+                    // CFTimeInterval represented in double (seconds)
+                    // For milliseconds it should be multiplied by 1000
+                    // Round needs for video/audio synchronization
+                    frameTime.value += lroundf(frameDuration * 1000.0);
                 }
                 CFRelease(sbuf);
             }
@@ -154,7 +166,6 @@ GLint uniforms[NUM_UNIFORMS];
     }
     
     [self showRenderTextureOnScreen];
-    
 }
 
 #pragma mark - Frame rendering
@@ -180,6 +191,8 @@ GLint uniforms[NUM_UNIFORMS];
         NSLog(@"failed to make complete framebuffer object %x", status);
         return;
     }
+    
+    [self initVertexBuffers];
 }
 
 - (void)initCVOpenGLESTexture {
@@ -190,7 +203,7 @@ GLint uniforms[NUM_UNIFORMS];
         NSAssert(NO, @"Error at CVOpenGLESTextureCacheCreate %d", err);
     }
     
-    glActiveTexture(GL_TEXTURE0 + GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS - 1);
+    glActiveTexture(GL_TEXTURE7);
     
     err = CVPixelBufferPoolCreatePixelBuffer (kCFAllocatorDefault, [[self assetWriterPixelBufferAdaptor] pixelBufferPool], &cvPixelBuffer);
     
@@ -222,16 +235,9 @@ GLint uniforms[NUM_UNIFORMS];
     glActiveTexture(GL_TEXTURE0);
 }
 
-- (void)showRenderTextureOnScreen {
-    glBindFramebuffer(GL_FRAMEBUFFER, [self originalFrameBuffer]);
-    glBindRenderbuffer(GL_RENDERBUFFER, [self originalRenderBuffer]);
-    
-    glClearColor(1.0, 1.0, 1.0, 1.0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
-    // Set texture polygons drawing order
-    // -1, -1 - lower left corner
-    //  1,  1 - upper right corner
+- (void)initVertexBuffers
+{
+    static const GLsizeiptr verticesSize = 4 * 2 * sizeof(GLfloat);
     static const GLfloat squareVertices[] = {
         -1.0f,    1.0f,
          1.0f,    1.0f,
@@ -239,53 +245,88 @@ GLint uniforms[NUM_UNIFORMS];
          1.0f,   -1.0f,
     };
     
-    int renderBufferWidth = 0;
-    int renderBufferHeight = 0;
-    
-    // Get renderbuffer dimensions
-    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &renderBufferWidth);
-    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &renderBufferHeight);
-    
-    // The texture vertices are set up such that we flip the texture vertically.
-    // This is so that our top left origin buffers match OpenGL's bottom left texture coordinate system.
-    CGRect textureSamplingRect = [self textureSamplingRectForCroppingTextureWithAspectRatio:CGSizeMake(renderBufferWidth, renderBufferHeight)
-                                                                              toAspectRatio:CGSizeMake(renderBufferWidth, renderBufferHeight)];
-    GLfloat textureVertices[] = {
-        CGRectGetMinX(textureSamplingRect), CGRectGetMaxY(textureSamplingRect),
-        CGRectGetMaxX(textureSamplingRect), CGRectGetMaxY(textureSamplingRect),
-        CGRectGetMinX(textureSamplingRect), CGRectGetMinY(textureSamplingRect),
-        CGRectGetMaxX(textureSamplingRect), CGRectGetMinY(textureSamplingRect),
+    static const GLsizeiptr textureSize = 4 * 2 * sizeof(GLfloat);
+    static const GLfloat squareTextureCoordinates[] = {
+        0.0f,   1.0f,
+        1.0f,   1.0f,
+        0.0f,   0.0f,
+        1.0f,   0.0f,
     };
     
+    static const GLsizeiptr indexSize = 6 * sizeof(GLushort);
+    static const GLushort indices[] = {
+        0, 1, 2,
+        2, 3, 1
+    };
+        
+    glGenBuffers(1, &_indexVBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexVBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize, indices, GL_STATIC_DRAW);
+    
+    glGenBuffers(1, &_positionVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, _positionVBO);
+    glBufferData(GL_ARRAY_BUFFER, verticesSize, squareVertices, GL_STATIC_DRAW);
+    
+    glEnableVertexAttribArray(POSITION_ATTRIBUTE);
+    glVertexAttribPointer(POSITION_ATTRIBUTE, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), 0);
+    
+    glGenBuffers(1, &_texcoordVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, _texcoordVBO);
+    glBufferData(GL_ARRAY_BUFFER, textureSize, squareTextureCoordinates, GL_DYNAMIC_DRAW);
+    
+    glEnableVertexAttribArray(TEXTURE_COORDINATE_ATTRIBUTE);
+    glVertexAttribPointer(TEXTURE_COORDINATE_ATTRIBUTE, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), 0);
+    
+    // Reset buffers
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+- (void)showRenderTextureOnScreen {
+    glBindFramebuffer(GL_FRAMEBUFFER, [self originalFrameBuffer]);
+    glBindRenderbuffer(GL_RENDERBUFFER, [self originalRenderBuffer]);
+    
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
     // Draw the texture to the original frame buffer with OpenGL ES 2.0
-    [self renderWithSquareVertices:squareVertices textureVertices:textureVertices];
+    [self renderTexture];
+    
+//    const GLenum discards[]  = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT };
+//    glBindFramebuffer(GL_FRAMEBUFFER, _renderFrameBuffer);
+//    glDiscardFramebufferEXT(GL_FRAMEBUFFER, 2, discards);
+//    
+//    glBindFramebuffer(GL_FRAMEBUFFER, [self originalFrameBuffer]);
+//    glBindRenderbuffer(GL_RENDERBUFFER, [self originalRenderBuffer]);
     
     // Present render buffer on screen
     if(![[EAGLContext currentContext] presentRenderbuffer:GL_RENDERBUFFER])
         printf_console("failed to present renderbuffer (%s:%i)\n", __FILE__, __LINE__ );
 }
 
-- (void)renderWithSquareVertices:(const GLfloat*)squareVertices textureVertices:(const GLfloat*)textureVertices {   
-    // Erase buffers for drawing
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
-    // Use shader program
+- (void)renderTexture
+{
     glUseProgram(passThroughProgram);
-
+    
+    int location = glGetUniformLocation(passThroughProgram, "videoframe");
     glActiveTexture(GL_TEXTURE0);
     glBindTexture( GL_TEXTURE_2D, CVOpenGLESTextureGetName(renderTexture) );
-    glUniform1i(uniforms[UNIFORM_TEXTURE], 0);
+    glUniform1i(location, 0);
     
-    // Update attribute values.
-    glVertexAttribPointer(ATTRIB_VERTEX, 2, GL_FLOAT, 0, 0, squareVertices);
-    glVertexAttribPointer(ATTRIB_TEXTUREPOSITION, 2, GL_FLOAT, 0, 0, textureVertices);
+    glEnableVertexAttribArray(POSITION_ATTRIBUTE);
+    glBindBuffer(GL_ARRAY_BUFFER, _positionVBO);
+    glVertexAttribPointer(POSITION_ATTRIBUTE, 2, GL_FLOAT, 0, 0, 0);
     
-    glEnableVertexAttribArray(ATTRIB_VERTEX);
-	glEnableVertexAttribArray(ATTRIB_TEXTUREPOSITION);
+    glEnableVertexAttribArray(TEXTURE_COORDINATE_ATTRIBUTE );
+    glBindBuffer(GL_ARRAY_BUFFER, _texcoordVBO);
+    glVertexAttribPointer(TEXTURE_COORDINATE_ATTRIBUTE, 2, GL_FLOAT, 0, 0, 0);
     
-    // Draw render texture on screen
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexVBO);
+    
+    glDrawElements(GL_TRIANGLE_STRIP, 6, GL_UNSIGNED_SHORT, 0);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 #pragma mark - Service functions
@@ -322,11 +363,11 @@ GLint uniforms[NUM_UNIFORMS];
         callbacks->compare = NULL;
         callbacks->dataBecameReadyNotification = NULL;
         
-        OSStatus queueCreationStatus = CMBufferQueueCreate(kCFAllocatorDefault, 0, callbacks, &previewBufferQueue);
+        CMBufferQueueCreate(kCFAllocatorDefault, 0, callbacks, &previewBufferQueue);
     }
     
-    
-    frameTime = CMTimeMake(0, 30);
+    // Frame time calulates in milliseconds
+    frameTime = CMTimeMake(1, 1000);
     
     if ([[NSFileManager defaultManager] fileExistsAtPath:[[self outputVideoFileURL] path]]) {
         [[NSFileManager defaultManager] removeItemAtURL:[self outputVideoFileURL] error:nil];
@@ -388,12 +429,12 @@ GLint uniforms[NUM_UNIFORMS];
     
     [writer release];
     
-    _audioWriter = [[AudioWriter alloc] init];
+    _audioWriter = [[CRAudioWriter alloc] init];
     [[self audioWriter] setOutputAudioFile:[self outputAudioFileURL]];
 }
 
 CMTime timeCallback(CMBufferRef buf, void *refcon){
-    return CMTimeMake(1, 30);
+    return CMTimeMake(1, 1000);
 }
 
 - (void)mergeVideo:(NSURL *)videoUrl withAudio:(NSURL *)audioUrl {
@@ -438,7 +479,9 @@ CMTime timeCallback(CMBufferRef buf, void *refcon){
     _assetExport.outputURL = [self exportedVideoURL];
     _assetExport.shouldOptimizeForNetworkUse = YES;
     
+    
     [_assetExport exportAsynchronouslyWithCompletionHandler:^{
+        
          switch (_assetExport.status)
          {
              case AVAssetExportSessionStatusCompleted: {
@@ -448,6 +491,7 @@ CMTime timeCallback(CMBufferRef buf, void *refcon){
                      [library writeVideoAtPathToSavedPhotosAlbum:[self exportedVideoURL]
                                                  completionBlock:^(NSURL *assetURL, NSError *error) {
                                                      [self removeTemporaryFiles];
+                                                     NSLog(@"Export Complete");
                                                  }];
                  }
                  [library release];
@@ -494,7 +538,7 @@ CMTime timeCallback(CMBufferRef buf, void *refcon){
     
     // Set shader attributes
     GLint attribLocation[NUM_ATTRIBUTES] = {
-        ATTRIB_VERTEX, ATTRIB_TEXTUREPOSITION,
+        POSITION_ATTRIBUTE, TEXTURE_COORDINATE_ATTRIBUTE,
     };
     GLchar *attribName[NUM_ATTRIBUTES] = {
         "position", "textureCoordinate",
@@ -505,7 +549,7 @@ CMTime timeCallback(CMBufferRef buf, void *refcon){
                       0, 0, 0, //  we don't need to get uniform locations
                       &passThroughProgram);
     
-    uniforms[UNIFORM_TEXTURE] = glGetUniformLocation(passThroughProgram, "videoframe");
+    //uniforms[UNIFORM_TEXTURE] = glGetUniformLocation(passThroughProgram, "videoframe");
 }
 
 - (CGRect)textureSamplingRectForCroppingTextureWithAspectRatio:(CGSize)textureAspectRatio toAspectRatio:(CGSize)croppingAspectRatio {

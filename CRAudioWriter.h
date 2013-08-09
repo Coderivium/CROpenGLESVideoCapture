@@ -8,7 +8,7 @@
 
 #import <Foundation/Foundation.h>
 
-@interface AudioWriter : NSObject 
+@interface CRAudioWriter : NSObject 
 
 @property (nonatomic, retain) NSURL *outputAudioFile;
 
